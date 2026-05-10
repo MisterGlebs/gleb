@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Testing / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments (keep environment.yml in repo)
+.venv/
+venv/

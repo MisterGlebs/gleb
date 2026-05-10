@@ -1,0 +1,12 @@
+name: gleb
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - pillow
+  - pip:
+      - typer[all]
+      - pydantic>=2
+      - pytest

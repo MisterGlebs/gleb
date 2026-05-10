@@ -1,0 +1,12 @@
+---
+description: Blender script constraints for gleb probe scripts
+globs: gleb/blender_scripts/**
+alwaysApply: false
+---
+
+# Blender Script Rules
+
+- Files in `gleb/blender_scripts/` execute inside Blender embedded Python.
+- Restrict imports to stdlib and `bpy` APIs only.
+- Do not import packages that are available only in the conda environment.
+- Emit one final JSON object to stdout for machine parsing by the CLI.

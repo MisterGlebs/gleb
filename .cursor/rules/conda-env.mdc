@@ -1,0 +1,13 @@
+---
+description: Enforce conda gleb environment for install and tests
+alwaysApply: true
+---
+
+# Conda Environment Rules
+
+- Use `conda run -n gleb` for all package install commands.
+- Use `conda run -n gleb pytest` for all test commands.
+- Do not use bare `python`, `pip`, or `pytest` commands.
+- Do not create `venv` or `virtualenv` environments in this project.
+- Install this package in editable mode with `conda run -n gleb pip install -e .`.
+- Set `BLENDER_PATH=/usr/bin/blender` when running test scenarios that invoke Blender.
