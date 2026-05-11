@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from gleb.commands.compare import compare_command
 from gleb.commands.create import create_command
 from gleb.commands.edit import edit_command
 from gleb.commands.explore import explore_command
@@ -12,7 +13,8 @@ from gleb.commands.textures import textures_app
 
 app = typer.Typer(
     help=(
-        "CLI for Blender 5+ automation workflows. "
+        "GLEB — Godot Level Export Blender-tool. "
+        "Blender 5+ automation for blend files and Godot-oriented export. "
         "Runs Blender in background mode (-b) and communicates via base64-encoded JSON payloads. "
         "Every command emits a single JSON envelope to stdout: "
         "{meta, summary, data, warnings, errors}. "
@@ -27,6 +29,7 @@ def root() -> None:
 
 
 app.command("explore")(explore_command)
+app.command("compare")(compare_command)
 app.command("edit")(edit_command)
 app.command("create")(create_command)
 app.command("export")(export_command)

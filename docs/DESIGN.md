@@ -1,5 +1,7 @@
 # Design Document
 
+**GLEB** — **G**odot **L**evel **E**xport **B**lender-tool: a CLI over Blender batch mode for `.blend` work and export aimed at **Godot** pipelines.
+
 ## Goals
 
 - Provide a natural-feeling CLI over Blender background mode operations.
@@ -129,6 +131,21 @@ gleb explore <file.blend> [--scope SCOPE] [--object NAME]... [--match exact|cont
 
 Scopes: `all`, `scene`, `collections`, `objects`, `materials`, `modifiers`, `animations`,
 `relations`, `constraints`, `geometry`, `textures`, `armatures`, `libraries`, `custom_properties`.
+
+---
+
+### `gleb compare`
+
+Semantic comparison of two `.blend` files: runs **`gleb explore`** on each path with the same
+options and diffs the resulting **`summary`** and **`data`** payloads (not binary file compare).
+See `docs/commands/compare.md` for full reference.
+
+```
+gleb compare <left.blend> <right.blend> [--scope SCOPE] [--object NAME]... [--match exact|contains|regex]
+             [--ignore-case] [--detail] [--diagnose] [--pretty]
+```
+
+Exit code **`0`** only when both probes succeed and structured content matches; **`1`** on failure or any difference (same convention as `diff(1)` for scripting).
 
 ---
 

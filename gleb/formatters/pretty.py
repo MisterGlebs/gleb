@@ -9,6 +9,8 @@ from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
+from gleb.core.json_diff import LEAF, ONLY_LEFT, ONLY_RIGHT
+from gleb.models.compare_schema import CompareResult
 from gleb.models.explore_schema import ExploreResult
 
 
@@ -162,6 +164,71 @@ def render_explore_pretty(result: ExploreResult, console: Console | None = None)
 
     if result.warnings:
         out.print()
+        out.print("[yellow]Warnings:[/yellow]")
+        for warning in result.warnings:
+            out.print(f"- {warning}")
+
+
+def _walk_compare_diff(parent: Tree, node: object, label: str) -> None:
+    if isinstance(node, dict):
+        if LEAF in node:
+            leaf = node[LEAF]
+            lv = leaf.get("left")
+            rv = leaf.get("right")
+            parent.add(f"{escape(label)}: [red]{lv!r}[/red] → [green]{rv!r}[/green]")
+            return
+        if ONLY_LEFT in node:
+            parent.add(f"{escape(label)}: [yellow]−[/yellow] {node[ONLY_LEFT]!r} [dim](left only)[/dim]")
+            return
+        if ONLY_RIGHT in node:
+            parent.add(f"{escape(label)}: [green]+[/green] {node[ONLY_RIGHT]!r} [dim](right only)[/dim]")
+            return
+        branch = parent.add(escape(label))
+        for key in sorted(node.keys()):
+            _walk_compare_diff(branch, node[key], str(key))
+        return
+    parent.add(f"{escape(label)}: {node!r}")
+
+
+def render_compare_pretty(result: CompareResult, console: Console | None = None) -> None:
+    out = console or Console()
+    m = result.meta
+    out.print(f"[bold]Left:[/bold] {m.left_file}")
+    out.print(f"[bold]Right:[/bold] {m.right_file}")
+    out.print(f"[bold]Blender:[/bold] {m.left_blender_version} vs {m.right_blender_version}")
+    out.print(f"[bold]Scope:[/bold] {m.scope}")
+    out.print(f"[bold]Identical:[/bold] {'yes' if m.identical else 'no'}")
+    out.print(f"[bold]Changed paths:[/bold] {result.summary.changed_paths}")
+    out.print()
+
+    ch = result.data.changes
+    if ch.summary:
+        out.print("[bold]Summary diff[/bold]")
+        tree = Tree("summary")
+        for key in sorted(ch.summary.keys()):
+            _walk_compare_diff(tree, ch.summary[key], str(key))
+        out.print(tree)
+        out.print()
+
+    if ch.explore_data:
+        out.print("[bold]Data diff[/bold]")
+        tree_d = Tree("explore_data")
+        for key in sorted(ch.explore_data.keys()):
+            _walk_compare_diff(tree_d, ch.explore_data[key], str(key))
+        out.print(tree_d)
+        out.print()
+
+    if result.summary.paths:
+        path_table = Table(title="Paths (sample)", show_lines=False)
+        path_table.add_column("path", overflow="fold")
+        max_rows = 200
+        for p in result.summary.paths[:max_rows]:
+            path_table.add_row(p)
+        if len(result.summary.paths) > max_rows:
+            path_table.add_row(f"[dim]… {len(result.summary.paths) - max_rows} more[/dim]")
+        out.print(path_table)
+
+    if result.warnings:
         out.print("[yellow]Warnings:[/yellow]")
         for warning in result.warnings:
             out.print(f"- {warning}")

@@ -1,6 +1,8 @@
 # gleb
 
-`gleb` is a Python CLI that drives Blender in batch mode (`blender -b`) to inspect and operate on `.blend` files and 3D assets.
+**GLEB** — **G**odot **L**evel **E**xport **B**lender-tool.
+
+`gleb` is a Python CLI that drives Blender in batch mode (`blender -b`) to inspect and operate on `.blend` files and 3D assets for workflows aimed at **Godot** (e.g. `.glb` exports and structured level data).
 
 ## Requirements
 
@@ -35,6 +37,9 @@ BLENDER_PATH=/usr/bin/blender gleb --help
 # Inspect a blend file
 gleb explore /path/to/file.blend --pretty
 
+# Compare two blends (semantic diff via explore)
+gleb compare /path/to/a.blend /path/to/b.blend --scope scene
+
 # Create a new blend file (_support/ + optional seed assets)
 gleb create source/levels/depot/depot.blend --asset north_facade --asset props
 
@@ -50,6 +55,7 @@ gleb edit /path/to/file.blend --op '{"type":"create_collection","name":"props"}'
 
 - `docs/DESIGN.md`
 - `docs/commands/explore.md`
+- `docs/commands/compare.md`
 - `docs/commands/create.md`
 - `docs/commands/export.md`
 

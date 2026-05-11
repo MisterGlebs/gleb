@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gleb"
 version = "0.1.0"
-description = "CLI for Blender 5+ asset and blend file operations"
+description = "Godot Level Export Blender-tool — CLI for Blender 5+ blend files and Godot-oriented export"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
