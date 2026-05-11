@@ -70,6 +70,52 @@ def export_command(
         "--materials",
         help="Blender glTF material mode: EXPORT (full PBR bake), PLACEHOLDER (slots only), VIEWPORT, NONE.",
     ),
+    bake_uv2: bool = typer.Option(
+        False,
+        "--bake-uv2/--no-bake-uv2",
+        help=(
+            "Bake a second UV layer (TEXCOORD_1) inside Blender for Godot LightmapGI. "
+            "Pre-applies modifiers (so Array/Mirror produce unique islands), runs "
+            "smart_project + average_islands_scale + pack_islands, and stamps a per-mesh "
+            "lightmap_texel_size custom property. Bypasses Godot's xatlas fallback."
+        ),
+    ),
+    uv2_method: str = typer.Option(
+        "smart",
+        "--uv2-method",
+        help="UV2 unwrap operator: 'smart' (Smart UV Project, default) or 'lightmap_pack'.",
+    ),
+    uv2_margin: float = typer.Option(
+        0.02,
+        "--uv2-margin",
+        help="Island margin in UV space, used by smart_project + pack_islands.",
+    ),
+    target_texel_density: float = typer.Option(
+        4.0,
+        "--target-texel-density",
+        help=(
+            "Lightmap texels per world meter (default 4.0 -> lightmap_texel_size 0.25). "
+            "Per-asset override via custom property on the asset root collection (see "
+            "--lightmap-texel-density-prop)."
+        ),
+    ),
+    write_import_sidecar: bool = typer.Option(
+        False,
+        "--write-import-sidecar",
+        help=(
+            "Write a Godot <asset>.glb.import file next to each .glb pre-configured for "
+            "LightmapGI (Static Lightmaps + lightmap_texel_size). Only writes if the file "
+            "does not already exist."
+        ),
+    ),
+    lightmap_texel_density_prop: str = typer.Option(
+        "lightmap_texel_density",
+        "--lightmap-texel-density-prop",
+        help=(
+            "Custom-property name read from each asset root collection to override "
+            "--target-texel-density per asset. Default 'lightmap_texel_density'."
+        ),
+    ),
 ) -> None:
     """Export each root asset collection as a separate .glb for Godot import.
 
@@ -118,6 +164,12 @@ def export_command(
             apply_modifiers=not no_apply_modifiers,
             export_tangents=not no_export_tangents,
             export_materials=mat,
+            bake_uv2=bake_uv2,
+            uv2_method=uv2_method,
+            uv2_margin=uv2_margin,
+            target_texel_density=target_texel_density,
+            lightmap_texel_density_prop=lightmap_texel_density_prop,
+            write_import_sidecar=write_import_sidecar,
             blender_path=blender,
             quiet=quiet,
         )
@@ -152,17 +204,32 @@ def _render_export_pretty(result: object) -> None:
     )
 
     if result.data.exports:  # type: ignore[attr-defined]
+        show_uv2 = any(
+            (entry.uv2_baked_meshes or entry.uv2_skipped_meshes or entry.lightmap_texel_size is not None)
+            for entry in result.data.exports  # type: ignore[attr-defined]
+        )
+        show_sidecar = any(entry.sidecar_path for entry in result.data.exports)  # type: ignore[attr-defined]
         table = Table(show_header=True, box=None, padding=(0, 2))
         table.add_column("asset")
         table.add_column("status")
+        if show_uv2:
+            table.add_column("uv2")
+            table.add_column("texel_size")
+        if show_sidecar:
+            table.add_column("sidecar")
         table.add_column("path")
         for entry in result.data.exports:  # type: ignore[attr-defined]
             colour = "green" if entry.status == "exported" else "red"
-            table.add_row(
-                entry.asset,
-                f"[{colour}]{entry.status}[/{colour}]",
-                entry.path,
-            )
+            row = [entry.asset, f"[{colour}]{entry.status}[/{colour}]"]
+            if show_uv2:
+                row.append(f"{entry.uv2_baked_meshes}b/{entry.uv2_skipped_meshes}s")
+                row.append(
+                    f"{entry.lightmap_texel_size:.4f}" if entry.lightmap_texel_size is not None else "-"
+                )
+            if show_sidecar:
+                row.append("yes" if entry.sidecar_path else "-")
+            row.append(entry.path)
+            table.add_row(*row)
         console.print(table)
 
     for w in result.warnings:  # type: ignore[attr-defined]

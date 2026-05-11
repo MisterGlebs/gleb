@@ -13,6 +13,10 @@ class AssetExport(BaseModel):
     asset: str
     path: str
     status: ExportStatus
+    uv2_baked_meshes: int = 0
+    uv2_skipped_meshes: int = 0
+    lightmap_texel_size: float | None = None
+    sidecar_path: str | None = None
 
 
 class ExportMeta(BaseModel):

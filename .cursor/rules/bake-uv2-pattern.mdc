@@ -1,0 +1,113 @@
+---
+description: How gleb export bakes UV2 inside Blender (duplicate-swap modifier bake, smart_project + average_islands_scale + pack_islands + per-component grid pack, per-asset texel density). Apply when modifying export_probe.py UV/lightmap code.
+globs: gleb/blender_scripts/export_probe.py
+alwaysApply: false
+---
+
+# Bake-UV2 pattern (export_probe)
+
+Reference doc: `docs/commands/export.md` "UV2 baking" section. Tests:
+`tests/test_export_uv2.py` (12 scenarios; must all pass after changes).
+
+## Why duplicate-swap, not in-place modifier apply
+
+`gleb export` MUST leave the source `.blend` byte-identical
+(`tests/test_export_uv2.py::test_uv2_source_blend_byte_identical`). In-place
+`bpy.ops.object.modifier_apply` mutates `obj.modifiers` and `obj.data` and
+breaks restoration if glTF export raises mid-run. Instead:
+
+1. `eval_obj = obj.evaluated_get(depsgraph)`
+2. `me_eval = bpy.data.meshes.new_from_object(eval_obj, preserve_all_data_layers=True, depsgraph=depsgraph)`
+3. `new_obj = obj.copy()` then `new_obj.data = me_eval` and clear modifiers on `new_obj`.
+4. Link `new_obj` into the original's owning collection; unlink the original from that same collection.
+5. Append `(orig, new_obj, me_eval, owning)` to `swap_records` for restore.
+
+Restoration runs in `finally`: unlink `new_obj` from `owning`, relink `orig`,
+then `bpy.data.objects.remove(new_obj)` and `bpy.data.meshes.remove(me_eval)`.
+Restore the LayerCollection `exclude` / `hide_viewport` flags LAST (mirrors the
+existing pattern for the un-exclude pre-pass).
+
+## Required operator order in `_ensure_uv2`
+
+Each step matters; do not reorder.
+
+```python
+bpy.ops.object.mode_set(mode="EDIT")
+bpy.ops.mesh.select_all(action="SELECT")
+bpy.ops.mesh.remove_doubles(threshold=1e-5)        # cheap topology hygiene
+bpy.ops.mesh.normals_make_consistent(inside=False)
+bpy.ops.uv.smart_project(...)                      # or lightmap_pack
+bpy.ops.uv.average_islands_scale()                 # equalize texels per 3D area
+bpy.ops.uv.pack_islands(margin=margin)
+bpy.ops.object.mode_set(mode="OBJECT")
+_grid_pack_components(me, margin)                  # per-component layout
+me.uv_layers[0].active_render = True               # MUST be re-asserted
+```
+
+### `_grid_pack_components` is mandatory
+
+Blender 5's `smart_project` / `unwrap` / `lightmap_pack` operators **deduplicate
+identical-geometry connected components** (Array / Mirror copies) and stack
+their UV islands on top of each other. `pack_islands` does NOT separate them
+(they are perfectly overlapping islands, not "overlapping enough to merge").
+
+`_grid_pack_components` walks vertex-connected components via union-find,
+computes each component's UV bbox, then assigns each to a distinct grid cell
+of `[0, 1]`. It is a no-op for single-component meshes. Removing this step
+breaks `tests/test_export_uv2.py::test_uv2_array_modifier_baked_before_unwrap`
+implicitly: Array copies will share lightmap texels and bake artifacts will
+spread across copies.
+
+### Render-active UV must be slot 0
+
+After Blender's unwrap operators, the new UV2 layer is `active = True` (active
+for editing). It is also marked `active_render = True` by Blender. Reset
+explicitly so glTF emits the original UV0 as `TEXCOORD_0` and the lightmap
+layer as `TEXCOORD_1`. Tested via sentinel UV0 coords in
+`tests/test_export_uv2.py::test_uv2_uv0_remains_render_active`.
+
+## Texel density math
+
+```
+lightmap_texel_size = 1.0 / target_texel_density
+```
+
+Per-asset override resolution lives in `_resolve_asset_density`:
+
+```python
+asset_coll.get(payload["lightmap_texel_density_prop"], payload["target_texel_density"])
+```
+
+The prop name is configurable via `--lightmap-texel-density-prop` (default
+`lightmap_texel_density`). Default density is `4.0` (texels per meter).
+
+The probe stamps `lightmap_texel_size` as a glTF custom property on the
+duplicate object. Godot's import dock setting (`meshes/lightmap_texel_size`)
+is driven by the optional `<asset>.glb.import` sidecar written from
+`gleb/commands/sidecar.py` (host-side, not in the probe).
+
+## Skip rules
+
+`_iter_visual_mesh_objects` walks `visual_*/(mesh|multimesh)_*/layer_*/`. UV2
+baking is **never** applied to:
+
+- Non-MESH objects.
+- Anything under `static_*/(trimesh|convex|box)_*/...`. Collision shapes do
+  not need UVs; running the unwrap on them wastes time and bytes. Tested in
+  `tests/test_export_uv2.py::test_uv2_skip_collision_meshes`.
+- Meshes that already have `>= 2` UV layers (honor pre-baked work). Emits a
+  warning. Tested in `tests/test_export_uv2.py::test_uv2_honors_pre_existing_uv2`.
+
+## Restoration invariant
+
+For every duplicate object allocated during the bake pass:
+
+1. Unlink `new_obj` from `owning`.
+2. Relink `orig` to `owning`.
+3. `bpy.data.objects.remove(new_obj, do_unlink=True)`.
+4. `bpy.data.meshes.remove(me_eval, do_unlink=True)`.
+
+All four steps wrapped in individual `try / except` so a partial failure does
+not skip later cleanup. After all duplicates are cleaned, restore
+`LayerCollection.exclude` / `hide_viewport`. Source `.blend` byte equality is
+the test bar (`test_uv2_source_blend_byte_identical`).

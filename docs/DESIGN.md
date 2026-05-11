@@ -165,22 +165,28 @@ See `docs/commands/export.md` for full reference.
 ```
 gleb export <file.blend> [--output-dir DIR] [--asset NAME]...
             [--no-apply-modifiers] [--no-export-tangents] [--materials EXPORT|PLACEHOLDER|VIEWPORT|NONE]
+            [--bake-uv2] [--uv2-method smart|lightmap_pack] [--uv2-margin FLOAT]
+            [--target-texel-density FLOAT] [--write-import-sidecar]
+            [--lightmap-texel-density-prop NAME]
             [--pretty] [--quiet] [--blender PATH]
 ```
 
 
-| Option                   | Description                                                                        |
-| ------------------------ | ---------------------------------------------------------------------------------- |
-| `--output-dir DIR`       | Directory for `.glb` output. Defaults to `<blend_dir>/export/`.                    |
-| `--asset NAME`           | Export only this root asset (repeatable). Exports all non-`_` roots when omitted.  |
-| `--no-apply-modifiers`   | Disable glTF “Apply Modifiers” (default applies; needed for shape keys).           |
-| `--no-export-tangents`   | Omit vertex tangents from glTF (default exports tangents for normal maps).        |
-| `--materials MODE`       | Blender glTF material export mode (`EXPORT`, `PLACEHOLDER`, `VIEWPORT`, `NONE`).   |
+| Option                          | Description                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| `--output-dir DIR`              | Directory for `.glb` output. Defaults to `<blend_dir>/export/`.                    |
+| `--asset NAME`                  | Export only this root asset (repeatable). Exports all non-`_` roots when omitted.  |
+| `--no-apply-modifiers`          | Disable glTF "Apply Modifiers" (default applies; needed for shape keys).           |
+| `--no-export-tangents`          | Omit vertex tangents from glTF (default exports tangents for normal maps).         |
+| `--materials MODE`              | Blender glTF material export mode (`EXPORT`, `PLACEHOLDER`, `VIEWPORT`, `NONE`).   |
+| `--bake-uv2`                    | Bake TEXCOORD_1 inside Blender for Godot LightmapGI. Pre-applies modifiers via duplicate-swap, runs `smart_project` + `average_islands_scale` + `pack_islands` + per-component grid pack, stamps `lightmap_texel_size`. Bypasses Godot's xatlas. |
+| `--target-texel-density FLOAT`  | Lightmap texels per world meter (`lightmap_texel_size = 1 / density`). Default `4.0`. Per-asset override via custom property on the asset root collection (see `--lightmap-texel-density-prop`). |
+| `--write-import-sidecar`        | Write a Godot `<asset>.glb.import` next to each `.glb` (Static Lightmaps + lightmap_texel_size). Write-only-if-missing. |
 
 
 `summary` fields: `assets_exported`, `assets_skipped`, `assets_failed`.
 
-`data` fields: `output_dir`, `exports` (list of `{asset, path, status}`).
+`data` fields: `output_dir`, `exports` (list of `{asset, path, status, uv2_baked_meshes, uv2_skipped_meshes, lightmap_texel_size, sidecar_path}`).
 
 ---
 

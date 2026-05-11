@@ -116,3 +116,6 @@ def test_pipeline_create_edit_export_import_roundtrip(tmp_path: Path) -> None:
     extras = vis.get("extras") or {}
     assert extras.get("godot_type") == "mesh"
     assert extras.get("render_layers") == 1
+    # Default-off back-compat: no UV2 baked unless --bake-uv2 is passed.
+    assert vis.get("uv_layers") == 1
+    assert "lightmap_texel_size" not in extras

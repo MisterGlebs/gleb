@@ -1,34 +1,49 @@
 # gleb
 
-`gleb` is a Python CLI that uses system Blender (`blender -b`) to inspect and operate on `.blend` files and 3D assets.
+`gleb` is a Python CLI that drives Blender in batch mode (`blender -b`) to inspect and operate on `.blend` files and 3D assets.
 
 ## Requirements
 
-- Blender 5+ available on PATH (or set `BLENDER_PATH`)
-- Miniconda installed
+- **Python 3.12+**
+- **Blender 5+** on your `PATH`, or set **`BLENDER_PATH`** to the Blender executable
 
-## Environment
+## Install
+
+From a checkout:
 
 ```bash
-conda env create -f environment.yml
-conda run -n gleb pip install -e .
+pip install -e .
+```
+
+Optional extras (e.g. texture helpers):
+
+```bash
+pip install -e ".[textures]"
+```
+
+This installs the `gleb` command. Confirm Blender is visible:
+
+```bash
+gleb --help
+# or, if Blender is not on PATH:
+BLENDER_PATH=/usr/bin/blender gleb --help
 ```
 
 ## Usage
 
 ```bash
 # Inspect a blend file
-conda run -n gleb gleb explore /path/to/file.blend --pretty
+gleb explore /path/to/file.blend --pretty
 
 # Create a new blend file (_support/ + optional seed assets)
-conda run -n gleb gleb create source/levels/depot/depot.blend --asset north_facade --asset props
+gleb create source/levels/depot/depot.blend --asset north_facade --asset props
 
 # Export each root asset collection to its own .glb (ignores names starting with _)
-conda run -n gleb gleb export source/levels/depot/depot.blend
-conda run -n gleb gleb export source/levels/depot/depot.blend --output-dir resources/levels/depot --pretty
+gleb export source/levels/depot/depot.blend
+gleb export source/levels/depot/depot.blend --output-dir resources/levels/depot --pretty
 
 # Apply structured edits to a blend file
-conda run -n gleb gleb edit /path/to/file.blend --op '{"type":"create_collection","name":"props"}'
+gleb edit /path/to/file.blend --op '{"type":"create_collection","name":"props"}'
 ```
 
 ## Docs
@@ -38,3 +53,6 @@ conda run -n gleb gleb edit /path/to/file.blend --op '{"type":"create_collection
 - `docs/commands/create.md`
 - `docs/commands/export.md`
 
+## Contributing / conda (optional)
+
+If you prefer Conda for local development, `environment.yml` defines a reproducible env; install the package in editable mode inside that env as usual (`pip install -e .`).

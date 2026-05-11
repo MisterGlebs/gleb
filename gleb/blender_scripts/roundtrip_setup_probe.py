@@ -20,6 +20,18 @@ def _link_only_to(obj: bpy.types.Object, coll: bpy.types.Collection) -> None:
     coll.objects.link(obj)
 
 
+def _find_layer_collection(
+    layer_coll: bpy.types.LayerCollection, target: bpy.types.Collection
+) -> bpy.types.LayerCollection | None:
+    if layer_coll.collection is target:
+        return layer_coll
+    for child in layer_coll.children:
+        found = _find_layer_collection(child, target)
+        if found is not None:
+            return found
+    return None
+
+
 def main() -> None:
     payload = decode_payload_from_argv()
     blend_path = str(payload.get("blend_path", ""))
@@ -29,6 +41,19 @@ def main() -> None:
     visual_prefix = str(payload.get("visual_object_prefix", "Vis"))
     support_name = str(payload.get("support_object_name", "SupportCube"))
     subsurf_levels = int(payload.get("subsurf_levels", 2))
+
+    array_count = int(payload.get("array_count", 1) or 1)
+    seed_collision = bool(payload.get("seed_collision", False))
+    pre_existing_uv2 = bool(payload.get("pre_existing_uv2", False))
+    asset_density_override_raw = payload.get("asset_density_override")
+    asset_density_override = (
+        float(asset_density_override_raw)
+        if asset_density_override_raw is not None
+        else None
+    )
+    exclude_asset_layer = bool(payload.get("exclude_asset_layer", False))
+    custom_uv0_name_raw = payload.get("custom_uv0_name")
+    custom_uv0_name = str(custom_uv0_name_raw) if custom_uv0_name_raw else None
 
     errors: list[str] = []
     created: list[str] = []
@@ -67,6 +92,49 @@ def main() -> None:
         mod = obj.modifiers.new(name="Subdivision", type="SUBSURF")
         mod.levels = subsurf_levels
         mod.render_levels = subsurf_levels
+
+        if array_count > 1:
+            arr = obj.modifiers.new(name="Array", type="ARRAY")
+            arr.count = array_count
+            arr.use_relative_offset = True
+            arr.relative_offset_displace = (1.5, 0.0, 0.0)
+            arr.use_merge_vertices = False
+
+        if pre_existing_uv2:
+            mesh = obj.data
+            if mesh is not None and len(mesh.uv_layers) < 2:
+                mesh.uv_layers.new(name="Pre", do_init=True)
+
+        if custom_uv0_name and obj.data is not None and len(obj.data.uv_layers) >= 1:
+            obj.data.uv_layers[0].name = custom_uv0_name
+            # Stamp a sentinel UV0 value so we can detect TEXCOORD_0 / TEXCOORD_1
+            # ordering after a glTF round-trip (which strips UV layer names).
+            uv0_data = obj.data.uv_layers[0].data
+            for li in range(len(uv0_data)):
+                uv0_data[li].uv = (0.42, 0.17)
+
+        if asset_density_override is not None:
+            asset_root = bpy.data.collections.get(asset)
+            if asset_root is not None:
+                asset_root["lightmap_texel_density"] = asset_density_override
+
+        if seed_collision:
+            tri_coll_name = f"tri_layer_1_{asset}"
+            tri_coll = bpy.data.collections.get(tri_coll_name)
+            if tri_coll is not None:
+                bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 5.0, 0.0))
+                col_obj = view_layer.objects.active
+                if col_obj is not None:
+                    col_obj.name = f"Col_{asset}"
+                    _link_only_to(col_obj, tri_coll)
+                    created.append(col_obj.name)
+
+        if exclude_asset_layer:
+            asset_root = bpy.data.collections.get(asset)
+            if asset_root is not None:
+                lc = _find_layer_collection(view_layer.layer_collection, asset_root)
+                if lc is not None:
+                    lc.exclude = True
 
         created.append(obj_name)
 
