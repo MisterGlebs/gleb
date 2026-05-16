@@ -404,3 +404,172 @@ def test_uv2_excluded_layer_collection_still_baked(tmp_path: Path) -> None:
 
     vis = _vis_object(_import_glb(out / "fac_a.glb"))
     assert vis["uv_layers"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 13. Parented children survive the bake AND keep their original names
+#     (regression for `__uv2bake` rename leak + glTF dropping orphan-parented
+#     selection: the addon silently omits selected objects whose parent isn't
+#     also in the selection).
+# ---------------------------------------------------------------------------
+
+
+def test_uv2_parented_children_survive_with_clean_names(tmp_path: Path) -> None:
+    blend = tmp_path / "rt.blend"
+    out = tmp_path / "export"
+    _gleb_create(blend)
+    _gleb_setup(blend, seed_parented_child=True)
+
+    pre_hash = hashlib.sha256(blend.read_bytes()).hexdigest()
+    er = _gleb_export(blend, out, "--bake-uv2", "--target-texel-density", "4")
+    post_hash = hashlib.sha256(blend.read_bytes()).hexdigest()
+    assert pre_hash == post_hash, "source .blend must remain byte-identical"
+
+    entry = er["data"]["exports"][0]
+    assert entry["status"] == "exported"
+    assert entry["uv2_baked_meshes"] == 2, entry
+
+    row = _import_glb(out / "fac_a.glb")
+    mesh_names = sorted(o["name"] for o in row["objects"] if o["type"] == "MESH")
+    # Both visual meshes survive the bake-and-swap.
+    assert mesh_names == ["Vis_fac_a", "Vis_fac_a_child"], mesh_names
+    # Bake suffix never leaks into final glb.
+    assert all("__uv2bake" not in n for n in mesh_names), mesh_names
+    assert all("__uv2orig" not in n for n in mesh_names), mesh_names
+
+    # Parent relationship is preserved through the bake (child's parent is the
+    # baked copy of the original parent, which now wears the original name).
+    child = next(o for o in row["objects"] if o["name"] == "Vis_fac_a_child")
+    assert child.get("parent") == "Vis_fac_a", child
+
+
+# ---------------------------------------------------------------------------
+# 14. Array copies produce non-overlapping UV2 islands (functional correctness
+#     of _separate_duplicate_components_in_uv + pack_islands).
+#     Previously enforced implicitly via a hand-rolled grid pack; the new
+#     pipeline relies on packer separation and this test guards it explicitly.
+# ---------------------------------------------------------------------------
+
+
+def test_uv2_array_copies_have_non_overlapping_uv2_islands(tmp_path: Path) -> None:
+    blend = tmp_path / "rt.blend"
+    out = tmp_path / "export"
+    _gleb_create(blend)
+    _gleb_setup(blend, array_count=4, subsurf_levels=2)
+
+    er = _gleb_export(blend, out, "--bake-uv2", "--target-texel-density", "4")
+    assert er["data"]["exports"][0]["uv2_baked_meshes"] == 1
+    vis = _vis_object(_import_glb(out / "fac_a.glb"))
+    assert vis["uv_layers"] == 2
+    # Each Array copy is its own vertex-connected component. The probe walks
+    # those components and union-find-checks that no two component UV2 AABBs
+    # overlap. If smart_project leaves identical copies stacked AND the new
+    # _separate_duplicate_components_in_uv + pack_islands flow fails to break
+    # the tie, this assertion fires.
+    assert vis["uv2_island_overlaps"] is False, vis
+
+
+# ---------------------------------------------------------------------------
+# 15. --uv2-fill-square fills the unit square (default density mode also fills
+#     it, but density mode does so via uniform fit-to-square; both modes must
+#     leave AABB ≈ [0,1]^2). Density mode preserves per-island ratios; fill
+#     mode allows pack_islands to rescale islands freely.
+# ---------------------------------------------------------------------------
+
+
+def test_uv2_fill_square_flag_changes_layout(tmp_path: Path) -> None:
+    """Both default and --uv2-fill-square must produce a UV2 atlas that nearly
+    fills [0,1]^2. Verified by spinning up a tiny inline Blender probe that
+    imports the .glb and computes the UV2 AABB on the visual mesh."""
+    import tempfile
+    import textwrap
+
+    blend = tmp_path / "rt.blend"
+    out_default = tmp_path / "export_default"
+    out_fill = tmp_path / "export_fill"
+    _gleb_create(blend)
+    _gleb_setup(blend, array_count=3, subsurf_levels=1)
+
+    _gleb_export(blend, out_default, "--bake-uv2", "--target-texel-density", "4")
+    _gleb_export(
+        blend,
+        out_fill,
+        "--bake-uv2",
+        "--target-texel-density",
+        "4",
+        "--uv2-fill-square",
+    )
+
+    glb_default = out_default / "fac_a.glb"
+    glb_fill = out_fill / "fac_a.glb"
+    assert glb_default.is_file() and glb_fill.is_file()
+
+    inline_probe = textwrap.dedent(
+        """
+        from __future__ import annotations
+        import bpy, json, sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _shared import decode_payload_from_argv, dump_json_line
+
+        def _aabb_for_glb(path):
+            for o in list(bpy.context.scene.objects):
+                bpy.data.objects.remove(o, do_unlink=True)
+            bpy.ops.import_scene.gltf(filepath=path)
+            target = next(
+                (o for o in bpy.context.scene.objects
+                 if o.type == 'MESH' and 'Vis_fac_a' in o.name and 'child' not in o.name),
+                None,
+            )
+            if target is None or target.data is None or len(target.data.uv_layers) < 2:
+                return None
+            uv = target.data.uv_layers[1].data
+            mn_u = mn_v = float('inf'); mx_u = mx_v = float('-inf')
+            for poly in target.data.polygons:
+                for li in poly.loop_indices:
+                    p = uv[li].uv
+                    if p.x < mn_u: mn_u = p.x
+                    if p.y < mn_v: mn_v = p.y
+                    if p.x > mx_u: mx_u = p.x
+                    if p.y > mx_v: mx_v = p.y
+            return [mn_u, mn_v, mx_u, mx_v]
+
+        payload = decode_payload_from_argv()
+        out = {p: _aabb_for_glb(p) for p in payload['glb_paths']}
+        dump_json_line({'summary': {}, 'data': {'aabbs': out}, 'warnings': [], 'errors': []})
+        """
+    )
+    probe_dir = ROOT / "gleb" / "blender_scripts"
+    with tempfile.NamedTemporaryFile(
+        "w", suffix="_uv2_aabb_probe.py", dir=probe_dir, delete=False
+    ) as fh:
+        fh.write(inline_probe)
+        probe_path = Path(fh.name)
+    try:
+        result, _ = run_blender_script(
+            probe_path,
+            {"glb_paths": [str(glb_default), str(glb_fill)]},
+            blender_path=_env()["BLENDER_PATH"],
+            quiet=True,
+        )
+    finally:
+        probe_path.unlink(missing_ok=True)
+
+    assert result.get("errors") == [], result
+    aabbs = result["data"]["aabbs"]
+    aabb_default = aabbs[str(glb_default)]
+    aabb_fill = aabbs[str(glb_fill)]
+    assert aabb_default is not None
+    assert aabb_fill is not None
+
+    def _hits_unit_square(bb: list[float], tol: float = 0.15) -> bool:
+        # Both modes should fill the unit square (each axis covers >= 1-tol).
+        return (bb[2] - bb[0]) >= 1.0 - tol and (bb[3] - bb[1]) >= 1.0 - tol
+
+    assert _hits_unit_square(aabb_default), aabb_default
+    assert _hits_unit_square(aabb_fill), aabb_fill
+    # Both modes stay inside [0,1]^2 (with a small numerical slack).
+    for bb in (aabb_default, aabb_fill):
+        assert -1e-3 <= bb[0] <= bb[2] <= 1.0 + 1e-3, bb
+        assert -1e-3 <= bb[1] <= bb[3] <= 1.0 + 1e-3, bb

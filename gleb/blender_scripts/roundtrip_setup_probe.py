@@ -54,6 +54,7 @@ def main() -> None:
     exclude_asset_layer = bool(payload.get("exclude_asset_layer", False))
     custom_uv0_name_raw = payload.get("custom_uv0_name")
     custom_uv0_name = str(custom_uv0_name_raw) if custom_uv0_name_raw else None
+    seed_parented_child = bool(payload.get("seed_parented_child", False))
 
     errors: list[str] = []
     created: list[str] = []
@@ -117,6 +118,20 @@ def main() -> None:
             asset_root = bpy.data.collections.get(asset)
             if asset_root is not None:
                 asset_root["lightmap_texel_density"] = asset_density_override
+
+        if seed_parented_child:
+            # Add a second visual mesh inside the same layer collection that is
+            # *parented* to the first. The Blender glTF exporter silently drops
+            # selected objects whose parent is missing from the selection, so the
+            # bake/swap pipeline must keep parent links intact across replacements.
+            bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(0.0, 2.0, 0.0))
+            child = view_layer.objects.active
+            if child is not None:
+                child.name = f"{visual_prefix}_{asset}_child"
+                _link_only_to(child, layer_coll)
+                child.parent = obj
+                child.matrix_parent_inverse = obj.matrix_world.inverted()
+                created.append(child.name)
 
         if seed_collision:
             tri_coll_name = f"tri_layer_1_{asset}"

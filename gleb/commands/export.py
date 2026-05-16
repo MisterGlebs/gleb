@@ -86,9 +86,22 @@ def export_command(
         help="UV2 unwrap operator: 'smart' (Smart UV Project, default) or 'lightmap_pack'.",
     ),
     uv2_margin: float = typer.Option(
-        0.02,
+        0.005,
         "--uv2-margin",
-        help="Island margin in UV space, used by smart_project + pack_islands.",
+        help=(
+            "Island margin in UV space (~ pixels at lightmap resolution; 0.005 "
+            "= ~5 px at 1024^2). Used as inter-island gap by the manual packer. "
+            "Larger values waste atlas area when there are many islands."
+        ),
+    ),
+    uv2_fill_square: bool = typer.Option(
+        False,
+        "--uv2-fill-square",
+        help=(
+            "After smart_project + island layout, uniformly scale the whole UV2 "
+            "layout to fill [0,1]^2. Skips average_islands_scale (default runs it "
+            "so larger 3D faces get more lightmap texels)."
+        ),
     ),
     target_texel_density: float = typer.Option(
         4.0,
@@ -167,6 +180,7 @@ def export_command(
             bake_uv2=bake_uv2,
             uv2_method=uv2_method,
             uv2_margin=uv2_margin,
+            uv2_fill_square=uv2_fill_square,
             target_texel_density=target_texel_density,
             lightmap_texel_density_prop=lightmap_texel_density_prop,
             write_import_sidecar=write_import_sidecar,

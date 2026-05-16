@@ -1,5 +1,5 @@
 ---
-description: How gleb export bakes UV2 inside Blender (duplicate-swap modifier bake, smart_project + average_islands_scale + pack_islands + per-component grid pack, per-asset texel density). Apply when modifying export_probe.py UV/lightmap code.
+description: How gleb export bakes UV2 inside Blender (duplicate-swap modifier bake, smart_project + manual per-component shelf packer, density vs fill_square modes, per-asset texel density). Apply when modifying export_probe.py UV/lightmap code.
 globs: gleb/blender_scripts/export_probe.py
 alwaysApply: false
 ---
@@ -7,7 +7,7 @@ alwaysApply: false
 # Bake-UV2 pattern (export_probe)
 
 Reference doc: `docs/commands/export.md` "UV2 baking" section. Tests:
-`tests/test_export_uv2.py` (12 scenarios; must all pass after changes).
+`tests/test_export_uv2.py` (15 scenarios; must all pass after changes).
 
 ## Why duplicate-swap, not in-place modifier apply
 
@@ -37,26 +37,30 @@ bpy.ops.mesh.select_all(action="SELECT")
 bpy.ops.mesh.remove_doubles(threshold=1e-5)        # cheap topology hygiene
 bpy.ops.mesh.normals_make_consistent(inside=False)
 bpy.ops.uv.smart_project(...)                      # or lightmap_pack
-bpy.ops.uv.average_islands_scale()                 # equalize texels per 3D area
-bpy.ops.uv.pack_islands(margin=margin)
+if not fill_square:
+    bpy.ops.uv.average_islands_scale()             # Blender sizes by 3D area
 bpy.ops.object.mode_set(mode="OBJECT")
-_grid_pack_components(me, margin)                  # per-component layout
+_pack_islands_manual(me, margin)                   # translate + one shared scale
+if fill_square:
+    _uniform_fit_uv2_layout(me, margin)            # uniform stretch to unit square
 me.uv_layers[0].active_render = True               # MUST be re-asserted
 ```
 
-### `_grid_pack_components` is mandatory
+### Why we DON'T call `bpy.ops.uv.pack_islands`
 
-Blender 5's `smart_project` / `unwrap` / `lightmap_pack` operators **deduplicate
-identical-geometry connected components** (Array / Mirror copies) and stack
-their UV islands on top of each other. `pack_islands` does NOT separate them
-(they are perfectly overlapping islands, not "overlapping enough to merge").
+Blender 5's `pack_islands` unconditionally **stacks identical-shape UV islands
+on top of each other** (a UDIM-tiling feature). Array / Mirror copies have
+identical topology, so their post-`smart_project` islands have identical shape
+and `pack_islands` collapses them into one stacked group.
 
-`_grid_pack_components` walks vertex-connected components via union-find,
-computes each component's UV bbox, then assigns each to a distinct grid cell
-of `[0, 1]`. It is a no-op for single-component meshes. Removing this step
-breaks `tests/test_export_uv2.py::test_uv2_array_modifier_baked_before_unwrap`
-implicitly: Array copies will share lightmap texels and bake artifacts will
-spread across copies.
+We replaced it with `_pack_islands_manual`: translate each UV island into
+`[margin, 1-margin]^2` with one shared scale factor. Island sizes come from
+`smart_project` and, in density mode, `average_islands_scale` — we do **not**
+rescale islands individually in the packer.
+
+`--uv2-fill-square` skips `average_islands_scale` and runs
+`_uniform_fit_uv2_layout` after layout so the whole mesh AABB fills the unit
+square with one uniform scale.
 
 ### Render-active UV must be slot 0
 
@@ -65,6 +69,26 @@ for editing). It is also marked `active_render = True` by Blender. Reset
 explicitly so glTF emits the original UV0 as `TEXCOORD_0` and the lightmap
 layer as `TEXCOORD_1`. Tested via sentinel UV0 coords in
 `tests/test_export_uv2.py::test_uv2_uv0_remains_render_active`.
+
+### Margin defaults intentionally small (0.005)
+
+`--uv2-margin` defaults to `0.005` — about 5 px at a 1024² lightmap atlas.
+Larger values (the original 0.02 = 20 px) waste enormous amounts of atlas
+area when meshes have many islands: with N islands per shelf, total margin
+overhead is roughly `2 * N * margin`. With ~150 islands, 0.02 margin eats
+~60% of the unit square; 0.005 eats ~15%. Empirically `9_1_base.blend`
+density-mode fill went from ~50% → ~75% by lowering this default. Don't
+raise the default without understanding this trade-off.
+
+### Verifying island non-overlap post-glTF
+
+`gltf_import_inspect_probe._uv2_island_overlaps` defines a UV island by
+**(quantized 3D position, quantized UV2 coord)** keys, NOT by post-import
+vertex topology. glTF round-trips split vertices at every UV seam, so
+post-import vertex indices partition every face into its own component — a
+purely-topological check would always report overlap. The position-bucket
+approach correctly merges loops that share a 3D point with the same UV.
+Tested in `test_uv2_array_copies_have_non_overlapping_uv2_islands`.
 
 ## Texel density math
 
@@ -85,6 +109,68 @@ The probe stamps `lightmap_texel_size` as a glTF custom property on the
 duplicate object. Godot's import dock setting (`meshes/lightmap_texel_size`)
 is driven by the optional `<asset>.glb.import` sidecar written from
 `gleb/commands/sidecar.py` (host-side, not in the probe).
+
+## Reparent baked copies + use clean names (mandatory)
+
+Two failure modes follow from the duplicate-swap design and BOTH must be
+handled before calling `bpy.ops.export_scene.gltf`:
+
+### 1. Reparent baked copies whose parent was also swapped
+
+Blender's glTF exporter (`export_scene.gltf`) **silently drops** any selected
+object whose `parent` is not also in the selection. After the bake loop, every
+new `__uv2bake` duplicate keeps a hard reference to its original parent (which
+we just unlinked from the asset). When two visual meshes in the same asset are
+parented to each other (e.g. detail piece parented to base wall), the child's
+duplicate gets dropped and its surface vanishes from the glb — Godot then
+shows that material slot as transparent.
+
+Run a second pass after the bake loop:
+
+```python
+orig_to_new = {rec[0].name: rec[1] for rec in swap_records}
+for orig, new_obj, _, _ in swap_records:
+    p = new_obj.parent
+    if p is not None and p.name in orig_to_new:
+        new_parent = orig_to_new[p.name]
+        world = new_obj.matrix_world.copy()
+        new_obj.parent = new_parent
+        new_obj.parent_type = orig.parent_type
+        new_obj.parent_bone = orig.parent_bone
+        new_obj.matrix_world = world  # reassert world to recompute parent_inverse
+```
+
+Tested in `test_uv2_parented_children_survive_with_clean_names`.
+
+### 2. Names must NOT carry the `__uv2bake` suffix in the exported glb
+
+Godot scene tools (`auto_resolve_materials`, name-based override maps) match
+on node names. The exported glb must use the **original** clean names, not
+`<name>__uv2bake`. Implement a pre-export name swap:
+
+```python
+for orig, new_obj, _, _ in swap_records:
+    clean = orig.name
+    orig.name = clean + "__uv2orig"
+    new_obj.name = clean
+    name_swaps.append((orig, clean, new_obj, baked_name))
+```
+
+Reverse the swap in the same `finally` block that runs the cleanup, BEFORE
+unlinking baked copies. Source `.blend` byte equality still holds because
+both rename ops are reversed before save would happen (and we never save).
+Tested via `test_uv2_parented_children_survive_with_clean_names` (asserts no
+`__uv2bake` / `__uv2orig` in any exported object name).
+
+## glTF `export_apply`
+
+Always pass the user’s `apply_modifiers` flag through to `bpy.ops.export_scene.gltf`
+(`export_apply=apply_modifiers`). Do **not** force `export_apply=False` when
+`bake_uv2` is on: UV2 duplicates already have modifiers cleared, so apply is a
+no-op for those meshes, but **other** selected objects (collision under
+`static_*`, helpers) still rely on apply for correct geometry and material
+alignment. Skipping apply globally caused transparent / wrong first surfaces in
+Godot for multi-material assets.
 
 ## Skip rules
 

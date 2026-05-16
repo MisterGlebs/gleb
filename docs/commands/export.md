@@ -43,8 +43,9 @@ gleb export <file.blend> [--output-dir DIR] [--asset NAME]... [--pretty] [--quie
 | `--blender PATH`    | Blender 5+ executable. |
 | `--bake-uv2 / --no-bake-uv2` | Bake a second UV layer (TEXCOORD_1) inside Blender for Godot LightmapGI. Default off. See "UV2 baking" below. |
 | `--uv2-method [smart\|lightmap_pack]` | Unwrap operator. Default `smart`. |
-| `--uv2-margin FLOAT` | Island margin in UV space. Default `0.02`. |
-| `--target-texel-density FLOAT` | Lightmap texels per world meter (`lightmap_texel_size = 1 / density`). Default `4.0` -> `0.25`. |
+| `--uv2-margin FLOAT` | Island margin in UV space (~ pixels at lightmap resolution; default `0.005` = ~5 px at 1024² atlas). Larger values waste atlas area when there are many islands. |
+| `--uv2-fill-square` | Skip `average_islands_scale`, then uniformly scale the whole UV2 layout to fill `[0, 1]^2`. Default off (density mode sizes islands by 3D area before layout). |
+| `--target-texel-density FLOAT` | Lightmap texels per world meter (`lightmap_texel_size = 1 / density`). Default `4.0` -> `0.25`. Ignored when `--uv2-fill-square` is on (the bake stops trying to make texel density consistent across components). |
 | `--write-import-sidecar` | Write a Godot `<asset>.glb.import` next to each `.glb`. Off by default; only writes if the file does not already exist. |
 | `--lightmap-texel-density-prop NAME` | Custom-property name read from each asset root collection to override `--target-texel-density` per asset. Default `lightmap_texel_density`. |
 
@@ -95,6 +96,9 @@ gleb export level.blend --asset a --asset b --pretty
 
 # Bake UV2 + write Godot import sidecar (recommended for LightmapGI)
 gleb export level.blend --bake-uv2 --target-texel-density 4 --write-import-sidecar
+
+# Same, but ignore texel density — let each UV component fill the atlas equally
+gleb export level.blend --bake-uv2 --uv2-fill-square --write-import-sidecar
 ```
 
 ## UV2 baking
@@ -107,11 +111,15 @@ For every `MESH` object under `visual_<asset>/(mesh|multimesh)_<asset>/layer_*/`
 
 1. **Modifier-bake first.** A duplicate of the object is created in place via `obj.evaluated_get(depsgraph)` + `bpy.data.meshes.new_from_object(...)`. All modifiers (Subdivision, Array, Mirror, Bevel, ...) are applied into a fresh mesh datablock. The duplicate is swapped into the asset's collection in place of the original; the original is unlinked. **Required**: a naive "unwrap then let glTF apply Array" yields one shared UV island for all Array copies.
 2. **Add UV2 layer.** A second UV layer is appended; UV0 stays render-active so glTF emits the original UV as `TEXCOORD_0` and the new layer as `TEXCOORD_1`.
-3. **Unwrap.** `bpy.ops.uv.smart_project` (or `lightmap_pack`) -> `bpy.ops.uv.average_islands_scale` (equalizes texels per 3D area within the mesh) -> `bpy.ops.uv.pack_islands`.
-4. **Per-component grid pack.** A deterministic pass walks vertex-connected components and lays each into its own grid cell of `[0, 1]`. Required because Blender's unwrap operators **deduplicate identical-geometry components** (Array / Mirror copies) and stack their UV islands on top of each other; the grid pack guarantees one UV slot per copy.
-5. **Stamp `lightmap_texel_size`** as a custom property on the duplicate (visible as a glTF `extra` on the imported `MeshInstance3D`).
-6. **glTF export** with `export_apply=False` (modifiers already applied).
-7. **Restore.** In `try / finally` the duplicate is unlinked, the original is relinked, and the duplicate's mesh datablock is removed. The source `.blend` is byte-identical before and after. Tested in `tests/test_export_uv2.py::test_uv2_source_blend_byte_identical`.
+3. **Initial projection.** `bpy.ops.uv.smart_project` (default) or `bpy.ops.uv.lightmap_pack`.
+4. **`average_islands_scale` (density mode only).** Blender sizes islands by 3D surface area.
+5. **Manual island layout (`_pack_islands_manual`).** Translates islands into `[margin, 1-margin]^2` with one shared scale factor. **Replaces `bpy.ops.uv.pack_islands`**, which stacks identical-shape Array / Mirror copies on top of each other.
+6. **Uniform fit (`--uv2-fill-square` only).** One scale on the whole layout so the mesh AABB fills the unit square.
+7. **Stamp `lightmap_texel_size`** as a custom property on the duplicate (visible as a glTF `extra` on the imported `MeshInstance3D`).
+8. **Reparent baked copies.** When two visual meshes in the same asset are parented to each other (e.g. detail piece parented to base wall), the duplicate of the child still references the *original* parent — which we just unlinked. The Blender glTF exporter silently drops any selected object whose parent isn't also in the selection, so the child would vanish from the `.glb` and Godot would render its material slot as transparent. After the bake loop runs a second pass to re-parent each duplicate to the duplicate of its parent (preserving world transform). Tested in `tests/test_export_uv2.py::test_uv2_parented_children_survive_with_clean_names`.
+9. **Swap names back to clean.** Just before the glTF call the duplicates take the originals' names (originals get a temporary `__uv2orig` suffix), so the exported glb's node names match the source `.blend` exactly — no `__uv2bake` leaking into Godot, and downstream name-based tools (`auto_resolve_materials`, override material maps keyed by node name) keep working. The swap is reversed in `finally` before the originals are relinked.
+10. **glTF export** still uses `--no-apply-modifiers` / `export_apply` from the CLI for the whole selection. UV2 duplicates already have empty modifier stacks and baked mesh data, so apply is a no-op for them; collision and other meshes still need `export_apply=True` when modifiers are enabled.
+11. **Restore.** In `try / finally` the duplicate is unlinked, the original is relinked, and the duplicate's mesh datablock is removed. The source `.blend` is byte-identical before and after. Tested in `tests/test_export_uv2.py::test_uv2_source_blend_byte_identical`.
 
 Collision meshes under `static_*` are deliberately untouched.
 

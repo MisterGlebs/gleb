@@ -280,20 +280,22 @@ def _bake_evaluated_copy(
     return new_obj, me_eval
 
 
-def _grid_pack_components(me: bpy.types.Mesh, margin: float) -> None:
-    """Lay out per-connected-component UV2 islands into a grid in [0,1] UV space.
+def _uv_islands(me: bpy.types.Mesh) -> dict[int, list[int]]:
+    """Return polygon-index lists keyed by UV-island root.
 
-    Required after smart_project / unwrap on Array-style meshes because Blender's
-    unwrap operators deduplicate identical-geometry components and stack their UV
-    islands on top of each other. This pass walks vertex-connected components and
-    assigns each one a distinct grid cell so lightmap atlases get unique texels per
-    Array copy.
+    Two polygons are in the same UV island iff they share an **edge** (3D vertex
+    pair) AND store identical UV2 coords at both endpoints (no UV seam between
+    them). Matches Blender's UV editor "island" definition.
+
+    This is what we want to pack — NOT vertex-connected components. A single
+    cube is one component but smart_project typically splits it into 1-6 UV
+    islands; packing only the component AABB wastes most of the unit square.
     """
     if len(me.uv_layers) < 2 or len(me.polygons) == 0:
-        return
+        return {}
     uv_layer = me.uv_layers[1].data
-
-    parent = list(range(len(me.vertices)))
+    n_polys = len(me.polygons)
+    parent = list(range(n_polys))
 
     def find(x: int) -> int:
         while parent[x] != x:
@@ -306,71 +308,259 @@ def _grid_pack_components(me: bpy.types.Mesh, margin: float) -> None:
         if ra != rb:
             parent[ra] = rb
 
-    for poly in me.polygons:
-        vs = list(poly.vertices)
-        for i in range(1, len(vs)):
-            union(vs[0], vs[i])
-
-    comps: dict[int, list[int]] = {}
+    quant = 1.0 / 1e-5
+    edge_bucket: dict[tuple[int, int, int, int, int, int], int] = {}
     for pi, poly in enumerate(me.polygons):
-        comps.setdefault(find(poly.vertices[0]), []).append(pi)
+        verts = list(poly.vertices)
+        loops = list(poly.loop_indices)
+        n = len(verts)
+        for i in range(n):
+            v0 = int(verts[i])
+            v1 = int(verts[(i + 1) % n])
+            uv0 = uv_layer[loops[i]].uv
+            uv1 = uv_layer[loops[(i + 1) % n]].uv
+            if v0 < v1:
+                v_min, v_max = v0, v1
+                uv_lo, uv_hi = uv0, uv1
+            else:
+                v_min, v_max = v1, v0
+                uv_lo, uv_hi = uv1, uv0
+            key = (
+                v_min,
+                v_max,
+                int(round(uv_lo.x * quant)),
+                int(round(uv_lo.y * quant)),
+                int(round(uv_hi.x * quant)),
+                int(round(uv_hi.y * quant)),
+            )
+            other = edge_bucket.get(key)
+            if other is None:
+                edge_bucket[key] = pi
+            else:
+                union(pi, other)
 
-    n = len(comps)
-    if n <= 1:
+    islands: dict[int, list[int]] = {}
+    for pi in range(n_polys):
+        islands.setdefault(find(pi), []).append(pi)
+    return islands
+
+
+def _shelf_pack(
+    rects: list[tuple[float, float]], margin: float, scale: float
+) -> list[tuple[float, float]] | None:
+    """First-Fit-Decreasing-Height shelf packer.
+
+    *rects* must already be sorted by height descending. Returns a list of
+    (offset_u, offset_v) for each rect at the same index, or None if any rect
+    fails to fit inside [margin, 1-margin]^2 at the given scale.
+    """
+    avail = 1.0 - 2.0 * margin
+    if avail <= 0.0:
+        return None
+    positions: list[tuple[float, float]] = [(0.0, 0.0)] * len(rects)
+    cur_x = margin
+    cur_y = margin
+    shelf_h = 0.0
+    for i, (w, h) in enumerate(rects):
+        sw = w * scale + margin
+        sh = h * scale + margin
+        if sw > avail + 1e-9 or sh > avail + 1e-9:
+            return None
+        if cur_x + sw > 1.0 - margin + 1e-9:
+            cur_y += shelf_h
+            cur_x = margin
+            shelf_h = 0.0
+        if cur_y + sh > 1.0 - margin + 1e-9:
+            return None
+        positions[i] = (cur_x, cur_y)
+        cur_x += sw
+        if sh > shelf_h:
+            shelf_h = sh
+    return positions
+
+
+def _uniform_fit_uv2_layout(me: bpy.types.Mesh, margin: float) -> None:
+    """Uniformly scale + translate all UV2 loops so the mesh AABB fills [margin, 1-margin]^2.
+
+    Preserves every island's relative size and spacing from smart_project /
+    average_islands_scale. This is the only scaling step in fill-square mode.
+    """
+    if len(me.uv_layers) < 2 or len(me.polygons) == 0:
+        return
+    uv_layer = me.uv_layers[1].data
+    u_min = v_min = float("inf")
+    u_max = v_max = float("-inf")
+    for poly in me.polygons:
+        for li in poly.loop_indices:
+            uv = uv_layer[li].uv
+            if uv.x < u_min:
+                u_min = uv.x
+            if uv.y < v_min:
+                v_min = uv.y
+            if uv.x > u_max:
+                u_max = uv.x
+            if uv.y > v_max:
+                v_max = uv.y
+    bb_w = max(u_max - u_min, 1e-6)
+    bb_h = max(v_max - v_min, 1e-6)
+    target = max(1.0 - 2.0 * margin, 0.01)
+    scale = min(target / bb_w, target / bb_h)
+    new_w = bb_w * scale
+    new_h = bb_h * scale
+    off_u = margin + (target - new_w) * 0.5 - u_min * scale
+    off_v = margin + (target - new_h) * 0.5 - v_min * scale
+    for poly in me.polygons:
+        for li in poly.loop_indices:
+            uv = uv_layer[li].uv
+            uv_layer[li].uv = (uv.x * scale + off_u, uv.y * scale + off_v)
+
+
+def _pack_islands_manual(me: bpy.types.Mesh, margin: float) -> None:
+    """Lay out UV2 islands without resizing them individually.
+
+    Replaces ``bpy.ops.uv.pack_islands`` because the operator stacks
+    identical-shape islands (Array / Mirror copies) on top of each other.
+
+    Island sizes come from smart_project and, in density mode,
+  average_islands_scale. This pass only translates islands (optional 90°
+    rotation for shelf packing) and applies one shared scale factor so
+    everything fits in [0, 1]^2.
+    """
+    if len(me.uv_layers) < 2 or len(me.polygons) == 0:
+        return
+    islands = _uv_islands(me)
+    if not islands:
         return
 
-    import math
-
-    cols = max(1, math.ceil(math.sqrt(n)))
-    rows = max(1, math.ceil(n / cols))
-    cell_w = 1.0 / cols
-    cell_h = 1.0 / rows
-    pad = min(margin, 0.45 * min(cell_w, cell_h))
-
-    for idx, (_root, poly_idxs) in enumerate(sorted(comps.items())):
-        row = idx // cols
-        col = idx % cols
-        bb_min_u = float("inf")
-        bb_min_v = float("inf")
-        bb_max_u = float("-inf")
-        bb_max_v = float("-inf")
-        for pi in poly_idxs:
+    uv_layer = me.uv_layers[1].data
+    info: list[dict[str, Any]] = []
+    for _root, pis in sorted(islands.items()):
+        mn_u = mn_v = float("inf")
+        mx_u = mx_v = float("-inf")
+        for pi in pis:
             poly = me.polygons[pi]
             for li in poly.loop_indices:
-                u, v = uv_layer[li].uv.x, uv_layer[li].uv.y
-                if u < bb_min_u:
-                    bb_min_u = u
-                if v < bb_min_v:
-                    bb_min_v = v
-                if u > bb_max_u:
-                    bb_max_u = u
-                if v > bb_max_v:
-                    bb_max_v = v
-        bb_w = max(bb_max_u - bb_min_u, 1e-6)
-        bb_h = max(bb_max_v - bb_min_v, 1e-6)
-        target_w = cell_w - 2 * pad
-        target_h = cell_h - 2 * pad
-        scale = min(target_w / bb_w, target_h / bb_h)
-        off_u = col * cell_w + pad
-        off_v = row * cell_h + pad
-        for pi in poly_idxs:
-            poly = me.polygons[pi]
-            for li in poly.loop_indices:
-                u, v = uv_layer[li].uv.x, uv_layer[li].uv.y
-                uv_layer[li].uv = (
-                    (u - bb_min_u) * scale + off_u,
-                    (v - bb_min_v) * scale + off_v,
-                )
+                p = uv_layer[li].uv
+                if p.x < mn_u:
+                    mn_u = p.x
+                if p.y < mn_v:
+                    mn_v = p.y
+                if p.x > mx_u:
+                    mx_u = p.x
+                if p.y > mx_v:
+                    mx_v = p.y
+        bb_w = max(mx_u - mn_u, 1e-6)
+        bb_h = max(mx_v - mn_v, 1e-6)
+        if bb_h > bb_w:
+            info.append(
+                {
+                    "pis": pis,
+                    "mn_u": mn_u,
+                    "mn_v": mn_v,
+                    "bb_w": bb_w,
+                    "bb_h": bb_h,
+                    "rotate": True,
+                    "target_w": bb_h,
+                    "target_h": bb_w,
+                }
+            )
+        else:
+            info.append(
+                {
+                    "pis": pis,
+                    "mn_u": mn_u,
+                    "mn_v": mn_v,
+                    "bb_w": bb_w,
+                    "bb_h": bb_h,
+                    "rotate": False,
+                    "target_w": bb_w,
+                    "target_h": bb_h,
+                }
+            )
+
+    info.sort(key=lambda c: c["target_h"], reverse=True)
+    rects = [(c["target_w"], c["target_h"]) for c in info]
+
+    lo, hi = 1e-9, 1e6
+    best_positions: list[tuple[float, float]] | None = None
+    best_scale = lo
+    for _ in range(60):
+        mid = (lo + hi) * 0.5
+        pos = _shelf_pack(rects, margin, mid)
+        if pos is not None:
+            best_positions = pos
+            best_scale = mid
+            lo = mid
+        else:
+            hi = mid
+    if best_positions is None:
+        import math
+
+        n = len(info)
+        cols = max(1, math.ceil(math.sqrt(n)))
+        cw = (1.0 - 2.0 * margin) / cols
+        rows = max(1, math.ceil(n / cols))
+        ch = (1.0 - 2.0 * margin) / rows
+        best_scale = min(
+            cw / max(c["target_w"] for c in info),
+            ch / max(c["target_h"] for c in info),
+        )
+        best_positions = []
+        for i in range(n):
+            r, col = divmod(i, cols)
+            best_positions.append((margin + col * cw, margin + r * ch))
+
+    for i, c in enumerate(info):
+        off_u, off_v = best_positions[i]
+        final_w = c["target_w"] * best_scale
+        final_h = c["target_h"] * best_scale
+        if c["rotate"]:
+            # 90° CCW: (x_local, y_local) -> (bb_h - y_local, x_local)
+            # then scale post-rot bbox (bb_h × bb_w) to (final_w × final_h).
+            sx = final_w / c["bb_h"]
+            sy = final_h / c["bb_w"]
+            for pi in c["pis"]:
+                for li in me.polygons[pi].loop_indices:
+                    p = uv_layer[li].uv
+                    xl = p.x - c["mn_u"]
+                    yl = p.y - c["mn_v"]
+                    uv_layer[li].uv = (
+                        (c["bb_h"] - yl) * sx + off_u,
+                        xl * sy + off_v,
+                    )
+        else:
+            sx = final_w / c["bb_w"]
+            sy = final_h / c["bb_h"]
+            for pi in c["pis"]:
+                for li in me.polygons[pi].loop_indices:
+                    p = uv_layer[li].uv
+                    uv_layer[li].uv = (
+                        (p.x - c["mn_u"]) * sx + off_u,
+                        (p.y - c["mn_v"]) * sy + off_v,
+                    )
 
 
 def _ensure_uv2(
     obj: bpy.types.Object,
     method: str,
     margin: float,
+    fill_square: bool,
     warnings: list[str],
     asset_name: str,
 ) -> bool:
-    """Add and unwrap a UV2 layer on *obj* in place. Return True if a layer was baked."""
+    """Add and unwrap a UV2 layer on *obj* in place. Return True if a layer was baked.
+
+    Pipeline (in order):
+
+      1. Initial projection — smart_project (default) or lightmap_pack.
+      2. Density mode only — average_islands_scale (Blender sizes islands by
+         3D surface area; no per-island rescaling in our packer).
+      3. _pack_islands_manual — translate islands into [0,1]^2 with one
+         shared scale factor. Replaces bpy.ops.uv.pack_islands, which stacks
+         identical-shape Array / Mirror copies on top of each other.
+      4. Fill-square mode only — _uniform_fit_uv2_layout stretches the whole
+         layout uniformly to fill [margin, 1-margin]^2.
+    """
     me = obj.data
     if me is None or len(me.polygons) == 0:
         return False
@@ -409,10 +599,14 @@ def _ensure_uv2(
                 correct_aspect=True,
                 scale_to_bounds=False,
             )
-        bpy.ops.uv.average_islands_scale()
-        bpy.ops.uv.pack_islands(margin=margin)
+        if not fill_square:
+            bpy.ops.uv.average_islands_scale()
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"[{asset_name}] {obj.name}: UV2 unwrap failed: {exc}")
+        try:
+            bpy.ops.object.mode_set(mode="OBJECT")
+        except Exception:  # noqa: BLE001
+            pass
         return False
     finally:
         try:
@@ -420,11 +614,9 @@ def _ensure_uv2(
         except Exception:  # noqa: BLE001
             pass
 
-    # Blender's unwrap operators deduplicate identical-geometry components
-    # (Array/Mirror copies). Apply a deterministic per-component grid pack so
-    # every connected component gets its own UV slot. No-op for single-component
-    # meshes.
-    _grid_pack_components(me, margin)
+    _pack_islands_manual(me, margin)
+    if fill_square:
+        _uniform_fit_uv2_layout(me, margin)
 
     for layer in me.uv_layers:
         layer.active_render = layer.name == uv0_name
@@ -458,7 +650,8 @@ def _export_collection_as_glb(
     export_materials: str = "EXPORT",
     bake_uv2: bool = False,
     uv2_method: str = "smart",
-    uv2_margin: float = 0.02,
+    uv2_margin: float = 0.005,
+    uv2_fill_square: bool = False,
     target_texel_density: float = 4.0,
     lightmap_texel_density_prop: str = "lightmap_texel_density",
 ) -> dict[str, Any]:
@@ -529,7 +722,7 @@ def _export_collection_as_glb(
                     f"[{asset_coll.name}] {orig.name}: skipped UV2 unwrap (mesh already has >=2 UV layers)."
                 )
             else:
-                if _ensure_uv2(new_obj, uv2_method, uv2_margin, warnings, asset_coll.name):
+                if _ensure_uv2(new_obj, uv2_method, uv2_margin, uv2_fill_square, warnings, asset_coll.name):
                     n_baked += 1
                 else:
                     n_skipped += 1
@@ -540,6 +733,35 @@ def _export_collection_as_glb(
 
         stats["uv2_baked"] = n_baked
         stats["uv2_skipped"] = n_skipped
+
+    name_swaps: list[tuple[bpy.types.Object, str, bpy.types.Object, str]] = []
+    if bake_uv2 and swap_records:
+        # Phase 2: re-parent baked copies whose parent was also swapped, otherwise
+        # the glTF exporter silently drops them (it only emits objects whose entire
+        # parent chain is in the selection).
+        orig_to_new: dict[str, bpy.types.Object] = {rec[0].name: rec[1] for rec in swap_records}
+        for _orig, new_obj, _me, _own in swap_records:
+            p = new_obj.parent
+            if p is not None and p.name in orig_to_new:
+                new_parent = orig_to_new[p.name]
+                world = new_obj.matrix_world.copy()
+                new_obj.parent = new_parent
+                new_obj.parent_type = _orig.parent_type
+                new_obj.parent_bone = _orig.parent_bone
+                new_obj.matrix_world = world
+
+        # Phase 3: swap names so the glTF gets the *original* clean names. We rename
+        # originals to <name>__uv2orig and rename baked copies to the original names.
+        # We restore both names in the finally block.
+        for orig, new_obj, _me, _own in swap_records:
+            clean = orig.name
+            baked_name = new_obj.name
+            tmp_orig_name = f"{clean}__uv2orig"
+            # First move the original out of the way (orig is not linked to any
+            # asset collection at this point, but still owns the name).
+            orig.name = tmp_orig_name
+            new_obj.name = clean
+            name_swaps.append((orig, clean, new_obj, baked_name))
 
     all_objs_after_swap = list(asset_coll.all_objects)
 
@@ -574,7 +796,12 @@ def _export_collection_as_glb(
             )
         else:
             bpy.context.view_layer.objects.active = selected[0]
-            export_apply = False if bake_uv2 else apply_modifiers
+            # Always honor apply_modifiers here. UV2-baked duplicates already have
+            # modifiers cleared and evaluated geometry in .data — export_apply is a
+            # no-op for them. Setting export_apply=False (old behavior) skipped
+            # modifier baking for *all* selected objects (collision, helpers, etc.),
+            # which desynced mesh from materials / tangents and caused transparent or
+            # wrong surfaces in Godot after import.
             try:
                 bpy.ops.export_scene.gltf(
                     filepath=output_path,
@@ -583,7 +810,7 @@ def _export_collection_as_glb(
                     export_extras=True,
                     export_yup=True,
                     export_materials=export_materials,
-                    export_apply=export_apply,
+                    export_apply=apply_modifiers,
                     export_tangents=export_tangents,
                     export_texcoords=True,
                     export_normals=True,
@@ -596,6 +823,19 @@ def _export_collection_as_glb(
         for obj in all_objs_after_swap:
             if obj.name in hide_states:
                 obj.hide_viewport, obj.hide_render = hide_states[obj.name]
+
+        # Reverse the name swap before unlinking baked copies so the original
+        # objects (which we're about to relink into the source .blend) reclaim
+        # their original names.
+        for orig, clean_name, new_obj, baked_name in reversed(name_swaps):
+            try:
+                new_obj.name = baked_name
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                orig.name = clean_name
+            except Exception:  # noqa: BLE001
+                pass
 
         for orig, new_obj, me_eval, owning in reversed(swap_records):
             try:
@@ -645,11 +885,12 @@ def main() -> None:
     uv2_method_raw = str(payload.get("uv2_method", "smart") or "smart").lower()
     uv2_method = uv2_method_raw if uv2_method_raw in {"smart", "lightmap_pack"} else "smart"
     try:
-        uv2_margin = float(payload.get("uv2_margin", 0.02))
+        uv2_margin = float(payload.get("uv2_margin", 0.005))
     except (TypeError, ValueError):
-        uv2_margin = 0.02
+        uv2_margin = 0.005
     if uv2_margin < 0.0:
-        uv2_margin = 0.02
+        uv2_margin = 0.005
+    uv2_fill_square = bool(payload.get("uv2_fill_square", False))
     try:
         target_texel_density = float(payload.get("target_texel_density", 4.0))
     except (TypeError, ValueError):
@@ -717,6 +958,7 @@ def main() -> None:
             bake_uv2=bake_uv2,
             uv2_method=uv2_method,
             uv2_margin=uv2_margin,
+            uv2_fill_square=uv2_fill_square,
             target_texel_density=target_texel_density,
             lightmap_texel_density_prop=lightmap_texel_density_prop,
         )

@@ -12,6 +12,7 @@ from rich.tree import Tree
 from gleb.core.json_diff import LEAF, ONLY_LEFT, ONLY_RIGHT
 from gleb.models.compare_schema import CompareResult
 from gleb.models.explore_schema import ExploreResult
+from gleb.models.glb_schema import GlbCompareResult, GlbInspectResult
 
 
 def _build_relations_map(relations: list[dict]) -> dict[str, str | None]:
@@ -232,3 +233,113 @@ def render_compare_pretty(result: CompareResult, console: Console | None = None)
         out.print("[yellow]Warnings:[/yellow]")
         for warning in result.warnings:
             out.print(f"- {warning}")
+
+
+# ---------------------------------------------------------------------------
+# glb pretty renderers
+# ---------------------------------------------------------------------------
+
+
+def render_glb_pretty(result: GlbInspectResult, console: Console | None = None) -> None:
+    out = console or Console()
+    out.print(f"[bold]Blender:[/bold] {result.meta.blender_version}")
+    out.print(
+        f"[bold]Files:[/bold] {result.summary.files_inspected} "
+        f"(failed: {result.summary.files_failed})  "
+        f"[bold]Objects:[/bold] {result.summary.objects_total}"
+    )
+    out.print()
+
+    for inspect in result.data.inspects:
+        head = f"[bold]{inspect.path}[/bold]"
+        if inspect.import_failed:
+            out.print(f"{head}  [red]IMPORT FAILED[/red]")
+            continue
+        out.print(f"{head}  objects={len(inspect.objects)}")
+        table = Table(show_lines=False, box=None)
+        table.add_column("name", overflow="fold")
+        table.add_column("type", style="dim")
+        table.add_column("parent", overflow="fold", style="dim")
+        table.add_column("verts", justify="right")
+        table.add_column("polys", justify="right")
+        table.add_column("uv", justify="right")
+        table.add_column("slots", overflow="fold")
+        table.add_column("polys/slot", overflow="fold", style="dim")
+        for o in inspect.objects:
+            slot_names = [
+                (s.material.name if s.material else "<empty>") for s in o.material_slots
+            ]
+            polys_per = ", ".join(f"{k}:{v}" for k, v in sorted(o.polys_per_slot.items()))
+            table.add_row(
+                escape(o.name),
+                o.type,
+                escape(o.parent or ""),
+                str(o.vertices),
+                str(o.polygons),
+                str(o.uv_layers),
+                escape(", ".join(slot_names)),
+                polys_per,
+            )
+        out.print(table)
+        out.print()
+
+    if result.warnings:
+        out.print("[yellow]Warnings:[/yellow]")
+        for w in result.warnings:
+            out.print(f"- {w}")
+    if result.errors:
+        out.print("[red]Errors:[/red]")
+        for e in result.errors:
+            out.print(f"- {e}")
+
+
+def render_glb_compare_pretty(result: GlbCompareResult, console: Console | None = None) -> None:
+    out = console or Console()
+    out.print(f"[bold]Left:[/bold] {result.meta.left}")
+    out.print(f"[bold]Right:[/bold] {result.meta.right}")
+    out.print(f"[bold]Blender:[/bold] {result.meta.blender_version}")
+    out.print(
+        f"[bold]Pairs:[/bold] {result.summary.pairs}  "
+        f"identical={result.summary.pairs_identical}  "
+        f"changed={result.summary.pairs_changed}"
+    )
+    out.print(f"[bold]Identical:[/bold] {'yes' if result.meta.identical else 'no'}")
+    if result.summary.pairs_only_in_left:
+        out.print(f"[yellow]Only in left:[/yellow] {result.summary.pairs_only_in_left}")
+    if result.summary.pairs_only_in_right:
+        out.print(f"[yellow]Only in right:[/yellow] {result.summary.pairs_only_in_right}")
+    out.print()
+
+    for pair in result.data.pairs:
+        marker = "[green]identical[/green]" if pair.identical else "[red]changed[/red]"
+        out.print(
+            f"[bold]{pair.name}[/bold]  {marker}  "
+            f"objects {pair.object_count_left}→{pair.object_count_right}"
+        )
+        if pair.objects_only_in_left:
+            sample = pair.objects_only_in_left[:10]
+            more = "" if len(pair.objects_only_in_left) <= 10 else f" (+{len(pair.objects_only_in_left)-10} more)"
+            out.print(f"  [yellow]missing in right:[/yellow] {sample}{more}")
+        if pair.objects_only_in_right:
+            sample = pair.objects_only_in_right[:10]
+            more = "" if len(pair.objects_only_in_right) <= 10 else f" (+{len(pair.objects_only_in_right)-10} more)"
+            out.print(f"  [yellow]extra in right:[/yellow] {sample}{more}")
+        if pair.object_diffs:
+            t = Table(show_lines=False, box=None)
+            t.add_column("object", overflow="fold")
+            t.add_column("fields_changed", overflow="fold")
+            for d in pair.object_diffs[:30]:
+                t.add_row(escape(d.name), escape(", ".join(d.fields_changed)))
+            if len(pair.object_diffs) > 30:
+                t.add_row("[dim]…[/dim]", f"[dim]+{len(pair.object_diffs)-30} more[/dim]")
+            out.print(t)
+        out.print()
+
+    if result.warnings:
+        out.print("[yellow]Warnings:[/yellow]")
+        for w in result.warnings:
+            out.print(f"- {w}")
+    if result.errors:
+        out.print("[red]Errors:[/red]")
+        for e in result.errors:
+            out.print(f"- {e}")

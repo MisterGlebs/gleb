@@ -1,0 +1,20 @@
+---
+description: When one-off helper scripts appear, prefer folding logic into gleb CLI
+alwaysApply: true
+---
+
+# Evolving the CLI instead of throwaway helpers
+
+When work requires a **supplementary helper script** (standalone Python, shell, ad-hoc probe, etc.) because **`gleb`’s existing commands are not enough**, do **not** treat deleting that script at the end as the default cleanup.
+
+Before removing it:
+
+1. **Identify reusable behavior** — Would you or another contributor need this again for `.blend` / Godot / asset workflows?
+2. **Fold into the product** — Prefer moving the logic into:
+   - an existing command (`gleb` subcommand + `gleb/commands/*` + shared utils), and/or
+   - the Blender probe layer (`gleb/blender_scripts/*`) when the work must run inside `bpy`, and/or
+   - shared core (`gleb/core/*`, models, formatters) as appropriate.
+3. **Add a command when warranted** — If the capability is distinct and reusable, add a **new** Typer subcommand (and docs under `docs/commands/` when user-facing).
+4. **Only drop the helper** when it is clearly **one-off and not product-shaped** (e.g. a single irreversible data fix for one machine). Even then, prefer a short note in commit message or `docs/` if the lesson matters for future CLI design.
+
+Goal: exploratory scripts should **graduate into `gleb`** when they encode real workflow value, instead of living only in chat history.

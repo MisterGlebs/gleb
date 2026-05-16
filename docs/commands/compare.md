@@ -2,19 +2,34 @@
 
 ## Purpose
 
-Compare two `.blend` files by running the same read-only **explore** probe on each file and diffing the structured `summary` and `data` sections. This is a **semantic** comparison of exported scene metadata — not a binary or datablock-level compare.
+Compare two artifacts by running the relevant read-only probe on each side and diffing the structured `summary` and `data` sections. This is a **semantic** comparison — not a binary or datablock-level compare.
 
-Left and right arguments follow **baseline vs candidate** ordering (same idea as `diff OLD NEW`).
+Three input modes are auto-detected from the argument types:
+
+| Left arg | Right arg | Mode |
+| -------- | --------- | ---- |
+| `*.blend` | `*.blend` | **blend ↔ blend** (explore probe + structural diff) |
+| `*.glb`   | `*.glb`   | **glb ↔ glb** (single-pair `gleb glb` inspect on both, then diff) |
+| directory | directory | **glb dir ↔ glb dir** (pair `.glb` files by basename, diff each pair) |
+
+Mixing `.blend` with `.glb` is rejected. Left/right arguments follow **baseline vs candidate** ordering (same idea as `diff OLD NEW`).
 
 ## Usage
 
 ```bash
+# blend ↔ blend (existing behavior)
 gleb compare <left.blend> <right.blend>
             [--scope SCOPE] [--object NAME]... [--match exact|contains|regex] [--ignore-case]
             [--detail] [--diagnose] [--pretty]
+
+# glb ↔ glb
+gleb compare <left.glb> <right.glb> [--pretty]
+
+# directory of .glb files ↔ directory of .glb files
+gleb compare <left_dir>/ <right_dir>/ [--pretty]
 ```
 
-Options match **`gleb explore`** so both sides use identical scope, object filters, and verbosity.
+The `--scope` / `--object` / `--match` / `--ignore-case` / `--detail` / `--diagnose` options apply to **blend ↔ blend** mode only and match the corresponding **`gleb explore`** options. They are ignored in glb modes.
 
 ## How it works
 
@@ -24,6 +39,8 @@ Options match **`gleb explore`** so both sides use identical scope, object filte
 List fields are compared **by index** (like positional diff). Reordering items in a list may therefore appear as edits even when the set of elements is unchanged.
 
 ## Output
+
+### blend ↔ blend
 
 Default: one JSON object to stdout with the usual gleb envelope keys:
 
@@ -35,21 +52,38 @@ Default: one JSON object to stdout with the usual gleb envelope keys:
 
 With **`--pretty`**, Rich renders trees for the diff plus a sample path table (first 200 paths).
 
+### glb ↔ glb / glb dir ↔ glb dir
+
+Same envelope but the schema is **`GlbCompareResult`** (see `docs/commands/glb.md`):
+
+- **`meta`** — `left`, `right`, `blender_version`, `identical`.
+- **`summary`** — `pairs`, `pairs_identical`, `pairs_changed`, plus `pairs_only_in_left` / `pairs_only_in_right` (in dir-pair mode, basenames present on only one side).
+- **`data.pairs`** — list of `GlbPairDiff`. Each pair carries: `name`, `left_path`, `right_path`, `identical`, `object_count_left/right`, `objects_only_in_left/right`, and `object_diffs` (per-mesh `fields_changed` from a fixed tracked-fields set: `type`, `parent`, `vertices`, `polygons`, `uv_layers`, `uv_layer_names`, `uv2_island_overlaps`, `uv0_sample`, `extras`, `material_slots`, `polys_per_slot`).
+
+The diff catches every class of regression I've personally hit on the `bake-uv2` flow: missing meshes (parent-orphan drop), suffix leak in node names, UV layer count or names changing, extras drift, material-slot rewiring (which in Godot manifests as transparent first surface), polygons re-routed across slots.
+
 ## Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
-| `0`  | Both probes succeeded and **`summary` / `data` are structurally identical** for the chosen options. |
-| `1`  | Validation or probe failure, non-empty probe `errors`, or **any** structural difference in `summary` / `data`. |
+| `0`  | Both sides succeeded **and** are structurally identical. |
+| `1`  | Validation or probe failure, non-empty probe `errors`, OR **any** structural difference. |
 
-Useful for scripts: `gleb compare a.blend b.blend || echo "changed"`.
+Useful for scripts: `gleb compare baseline/ candidate/ || echo "changed"`.
 
 ## Examples
 
 ```bash
+# blend ↔ blend
 gleb compare scene_v1.blend scene_v2.blend
 gleb compare base.blend branch.blend --scope objects --pretty
 gleb compare a.blend b.blend --scope materials --object Body --match contains
+
+# glb ↔ glb (find the parented-orphan / material drop after a bake change)
+gleb compare exports/no_uv2/level.glb exports/with_uv2/level.glb --pretty
+
+# glb dir ↔ glb dir (diff every paired asset between two export runs)
+gleb compare exports/baseline exports/candidate --pretty
 ```
 
 Blender is resolved like other commands: executable on `PATH` or **`BLENDER_PATH`**.

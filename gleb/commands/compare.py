@@ -1,4 +1,4 @@
-"""CLI command: compare two .blend files via explore snapshots."""
+"""CLI command: compare two .blend files via explore snapshots, or two .glb files / dirs of .glb files."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from pathlib import Path
 import typer
 
 from gleb.commands.explore_utils import normalize_match, normalize_scope, run_explore
+from gleb.commands.glb_utils import is_glb_compare_pair, run_glb_compare
 from gleb.core.exceptions import GlebError
 from gleb.core.json_diff import diff_any, flatten_diff_paths
-from gleb.formatters.pretty import render_compare_pretty
+from gleb.formatters.pretty import render_compare_pretty, render_glb_compare_pretty
 from gleb.models.compare_schema import (
     CompareChanges,
     CompareDataPayload,
@@ -60,17 +61,21 @@ def _build_compare_result(left: ExploreResult, right: ExploreResult) -> CompareR
 
 
 def compare_command(
-    left_blend: Path = typer.Argument(
+    left: Path = typer.Argument(
         ...,
         exists=True,
-        dir_okay=False,
-        help="Baseline .blend file (opened read-only).",
+        help=(
+            "Baseline. Either a .blend file (opened read-only via explore) OR a .glb "
+            "file OR a directory of .glb files (inspected via the glb probe)."
+        ),
     ),
-    right_blend: Path = typer.Argument(
+    right: Path = typer.Argument(
         ...,
         exists=True,
-        dir_okay=False,
-        help="Comparison .blend file (opened read-only).",
+        help=(
+            "Comparison. Same kind as `left` (mixing .blend with .glb is rejected). "
+            "Two directories pair their .glb files by basename."
+        ),
     ),
     scope: str = typer.Option(
         "all",
@@ -112,17 +117,83 @@ def compare_command(
         help="Human-readable Rich output instead of JSON.",
     ),
 ) -> None:
-    """Compare two .blend files using the same explore probe on each side.
+    """Compare two .blend files (via explore snapshot) OR two .glb files / two directories of .glbs.
 
-    Exit code 0 only when structured summary and data sections match; otherwise 1
-    (including probe failures). Left/right map to baseline vs candidate ordering.
+    Mode is chosen from the file types of the arguments. Exit code 0 only when
+    the two sides match; otherwise 1 (including probe failures). Left/right map
+    to baseline vs candidate ordering.
+
+    Examples:
+      gleb compare a.blend b.blend                  # blend ↔ blend (existing behavior)
+      gleb compare baseline.glb candidate.glb       # single-glb diff
+      gleb compare exports/baseline exports/candidate  # pairs .glb files by basename
     """
+    if is_glb_compare_pair(left, right):
+        try:
+            glb_result = run_glb_compare(left, right)
+        except GlebError as exc:
+            typer.echo(
+                json.dumps(
+                    {
+                        "meta": {"left": str(left), "right": str(right), "command": "compare-glb"},
+                        "summary": {},
+                        "data": {"pairs": []},
+                        "warnings": [],
+                        "errors": [str(exc)],
+                    },
+                    ensure_ascii=True,
+                )
+            )
+            raise typer.Exit(code=1) from exc
+
+        if pretty:
+            render_glb_compare_pretty(glb_result)
+        else:
+            typer.echo(glb_result.model_dump_json())
+
+        if glb_result.errors or not glb_result.meta.identical:
+            raise typer.Exit(code=1)
+        return
+
+    if left.is_dir() or right.is_dir():
+        typer.echo(
+            json.dumps(
+                {
+                    "meta": {"left": str(left), "right": str(right)},
+                    "summary": {},
+                    "data": {},
+                    "warnings": [],
+                    "errors": [
+                        "compare: directories are only supported when both contain .glb files. "
+                        "Pass two .blend files for the explore-based diff."
+                    ],
+                },
+                ensure_ascii=True,
+            )
+        )
+        raise typer.Exit(code=1)
+
+    if left.suffix.lower() == ".glb" or right.suffix.lower() == ".glb":
+        typer.echo(
+            json.dumps(
+                {
+                    "meta": {"left": str(left), "right": str(right)},
+                    "summary": {},
+                    "data": {},
+                    "warnings": [],
+                    "errors": ["compare: cannot mix .blend and .glb arguments."],
+                },
+                ensure_ascii=True,
+            )
+        )
+        raise typer.Exit(code=1)
+
     names = object_names or []
     try:
         normalized_scope = normalize_scope(scope)
         normalized_match = normalize_match(match)
-        left = run_explore(
-            blend_file=left_blend,
+        left_explore = run_explore(
+            blend_file=left,
             scope=normalized_scope,
             object_names=names,
             match=normalized_match,
@@ -130,8 +201,8 @@ def compare_command(
             detail=detail,
             diagnose=diagnose,
         )
-        right = run_explore(
-            blend_file=right_blend,
+        right_explore = run_explore(
+            blend_file=right,
             scope=normalized_scope,
             object_names=names,
             match=normalized_match,
@@ -144,8 +215,8 @@ def compare_command(
             json.dumps(
                 {
                     "meta": {
-                        "left_file": str(left_blend),
-                        "right_file": str(right_blend),
+                        "left_file": str(left),
+                        "right_file": str(right),
                         "scope": scope,
                     },
                     "summary": {},
@@ -158,14 +229,14 @@ def compare_command(
         )
         raise typer.Exit(code=1) from exc
 
-    probe_errors = list(left.errors) + list(right.errors)
+    probe_errors = list(left_explore.errors) + list(right_explore.errors)
     if probe_errors:
         typer.echo(
             json.dumps(
                 {
                     "meta": {
-                        "left_file": str(left_blend),
-                        "right_file": str(right_blend),
+                        "left_file": str(left),
+                        "right_file": str(right),
                         "scope": scope,
                     },
                     "summary": {},
@@ -178,7 +249,7 @@ def compare_command(
         )
         raise typer.Exit(code=1)
 
-    result = _build_compare_result(left, right)
+    result = _build_compare_result(left_explore, right_explore)
 
     if pretty:
         render_compare_pretty(result)

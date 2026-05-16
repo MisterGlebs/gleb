@@ -18,7 +18,8 @@ def run_export(
     export_materials: str = "EXPORT",
     bake_uv2: bool = False,
     uv2_method: str = "smart",
-    uv2_margin: float = 0.02,
+    uv2_margin: float = 0.005,
+    uv2_fill_square: bool = False,
     target_texel_density: float = 4.0,
     lightmap_texel_density_prop: str = "lightmap_texel_density",
     write_import_sidecar: bool = False,
@@ -35,6 +36,7 @@ def run_export(
         "bake_uv2": bake_uv2,
         "uv2_method": uv2_method,
         "uv2_margin": uv2_margin,
+        "uv2_fill_square": uv2_fill_square,
         "target_texel_density": target_texel_density,
         "lightmap_texel_density_prop": lightmap_texel_density_prop,
     }

@@ -136,16 +136,40 @@ Scopes: `all`, `scene`, `collections`, `objects`, `materials`, `modifiers`, `ani
 
 ### `gleb compare`
 
-Semantic comparison of two `.blend` files: runs **`gleb explore`** on each path with the same
-options and diffs the resulting **`summary`** and **`data`** payloads (not binary file compare).
-See `docs/commands/compare.md` for full reference.
+Semantic comparison of two artifacts. Mode is auto-detected from argument types:
+
+- **`<left.blend> <right.blend>`** — runs **`gleb explore`** on each side and diffs the resulting `summary` / `data`.
+- **`<left.glb> <right.glb>`** — runs the **`gleb glb`** import probe on each side and diffs per-object metadata.
+- **`<left_dir>/ <right_dir>/`** — pairs the `.glb` files in each directory by basename and diffs every pair; reports unmatched basenames in `pairs_only_in_left` / `pairs_only_in_right`.
+
+Mixing `.blend` and `.glb` is rejected. See `docs/commands/compare.md` for full reference.
 
 ```
-gleb compare <left.blend> <right.blend> [--scope SCOPE] [--object NAME]... [--match exact|contains|regex]
+gleb compare <left> <right> [--scope SCOPE] [--object NAME]... [--match exact|contains|regex]
              [--ignore-case] [--detail] [--diagnose] [--pretty]
 ```
 
-Exit code **`0`** only when both probes succeed and structured content matches; **`1`** on failure or any difference (same convention as `diff(1)` for scripting).
+Exit code **`0`** only when both sides succeed and structured content matches; **`1`** on failure or any difference (same convention as `diff(1)` for scripting).
+
+---
+
+### `gleb glb`
+
+Inspect exported `.glb` files in a fresh Blender session. Single subcommand:
+**`gleb glb show`** imports each `.glb` (one subprocess for the whole list, scene
+cleared between files) and reports per-object metadata: name, parent, vertex /
+polygon counts, glTF extras, UV layer state (count + names + UV0 sentinel +
+UV2-island-overlap check), material slots (per-slot material name, blend method,
+base color, alpha, principled BSDF fields), and `polys_per_slot` distribution.
+
+This is the host-side counterpart of `gleb explore` — the diagnostic surface
+needed to triage post-export issues without spinning up Godot. The diff side
+(two `.glb` files or two directories of them) is folded into `gleb compare`.
+See `docs/commands/glb.md` for full reference.
+
+```
+gleb glb show <file.glb> [<file2.glb> ...] [--pretty] [--quiet/--verbose]
+```
 
 ---
 
